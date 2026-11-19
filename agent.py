@@ -9,6 +9,8 @@ Where you edit:   grep -n '✏' agent.py   (six marks, one per place)
 Steps and gates:  https://anthropicpartnerbasecamp.bts.com/
 """
 from __future__ import annotations
+import re
+from pathlib import Path
 from typing import Any, Dict, List
 from support import (MODEL, SYSTEM_PROMPT, call_local, execute_tool, mcp_client,
                      new_session, next_available_day, record_tool_result,
@@ -16,9 +18,71 @@ from support import (MODEL, SYSTEM_PROMPT, call_local, execute_tool, mcp_client,
 
 MAX_TOOL_CALLS = 8  # Larkspur's own build capped the loop here; then a human takes over.
 
+FARE_RULES_FILE = Path(__file__).parent / "data" / "americas" / "fare_rules_excerpt.md"
+
+
+def fare_rules(section: str) -> Any:
+    """The Handbook text behind a fare rule or care entitlement. Reads the excerpt
+    from disk, splits it on its `### ` headings, and returns the one section asked
+    for. `section` is a number ("6") or any words from the title ("care while you
+    wait"), because a caller asking about hotels does not know it is section 6."""
+    try:
+        text = FARE_RULES_FILE.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {"error": "The fare rules excerpt could not be read: %s" % exc}
+
+    sections = []  # (number, title, full text)
+    for part in re.split(r"^### ", text, flags=re.M)[1:]:
+        heading, _, body = part.partition("\n")
+        m = re.match(r"(\d+)\.\s*(.*)", heading)
+        number, title = (m.group(1), m.group(2)) if m else ("", heading)
+        sections.append((number, title, "### %s\n\n%s" % (heading, body.strip())))
+    labels = ", ".join("%s (%s)" % (n, t) for n, t, _ in sections)
+
+    query = re.sub(r"^section\s+", "", (section or "").strip().lower()).rstrip(".")
+    if not query:
+        return {"error": "section is required. Available sections: %s." % labels}
+    for number, _title, full in sections:
+        if query == number:
+            return full
+    for _number, title, full in sections:
+        if query in title.lower():
+            return full
+    return {"error": "No section matches %r. Available sections: %s." % (section, labels)}
+
+
 TONE_ADDENDUM = ""                       # ✏️ Build 4, step 4.1, intelligence goal
-EXTRA_TOOLS: List[Dict[str, Any]] = []   # ✏️ Build 2, step 2.1: schemas for the tools you add
-LOCAL_TOOLS: Dict[str, Any] = {}         # ✏️ Build 2, step 2.1: the functions behind them
+EXTRA_TOOLS: List[Dict[str, Any]] = [    # ✏️ Build 2, step 2.1: schemas for the tools you add
+    {
+        "name": "fare_rules",
+        "description": (
+            "Return the Larkspur Handbook text behind a fare rule or a care entitlement. "
+            "Call it when a customer asks why something is or is not covered, or wants to "
+            "know the rule itself (for example why there is no hotel when the cause is "
+            "weather), so the reply can quote the Handbook instead of paraphrasing it. It "
+            "needs one section: a number such as 6, or words from the section title. It "
+            "returns that section's full text. It only reads: it does not decide what the "
+            "customer is owed. check_policy decides that, and this explains it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "section": {
+                    "type": "string",
+                    "description": (
+                        "Which section to read: a number like '6', or words from its title, "
+                        "such as 'fare families', 'when we delay', 'care while you wait' or "
+                        "'chat automation'."
+                    ),
+                },
+            },
+            "required": ["section"],
+        },
+    },
+]
+LOCAL_TOOLS: Dict[str, Any] = {          # ✏️ Build 2, step 2.1: the functions behind them
+    "fare_rules": fare_rules,
+}
 
 
 def text_of(response) -> str:
@@ -65,26 +129,23 @@ def run_agent(pnr: str, last_name: str, message: str) -> str:            # ✏�
         thinking={"type": "adaptive"}, tools=tools, messages=messages,
     )
 
-    answer = ""
     turns = 1
     while response.stop_reason == "tool_use" and turns < MAX_TOOL_CALLS:
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results(response)})
-        answer = text_of(response)
         response = client.messages.create(
             model=MODEL, max_tokens=4096, system=runtime_preamble() + SYSTEM_PROMPT + TONE_ADDENDUM,
             thinking={"type": "adaptive"}, tools=tools, messages=messages,
         )
         turns += 1
 
-    return answer
+    return text_of(response)
 
 
 def tool_list() -> List[Dict[str, Any]]:                   # ✏️ Build 2, step 2.2
     """Given. Exactly what Claude is offered on every turn; run.py --show-tools
     prints this list."""
-    """return build_tools() + EXTRA_TOOLS"""
-    return build_tools() + EXTRA_TOOLS + mcp_client.tools()
+    return build_tools() + EXTRA_TOOLS
 
 
 
@@ -121,14 +182,21 @@ def build_tools() -> List[Dict[str, Any]]:                 # ✏️ Build 1, ste
                 "type": "object",
                 "properties": {
                     "flight_no": {"type": "string"},
-                    "date": {"type": "string", "description": "MM/DD/YYYY"},
+                    "date": {"type": "string", "description": "Local flight date as YYYY-MM-DD, e.g. 2025-05-08"},
                 },
                 "required": ["flight_no", "date"],
             },
         },
         {
             "name": "search_alternatives",
-            "description": "search",
+            "description": (
+                "Find ranked rebooking options for this customer's booking after a "
+                "cancellation or long delay. Use it once get_flight_status shows the flight "
+                "is cancelled or badly delayed and the customer needs another flight. "
+                "Returns options, each with an option_id, flights, date, times, seats left "
+                "and fare difference. It only searches: it does not hold or book a seat. "
+                "Pass an option_id to hold_seat to reserve one."
+            ),
             "input_schema": {
                 "type": "object",
                 "properties": {"pnr": {"type": "string"}},
