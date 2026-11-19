@@ -8,7 +8,7 @@ Number: About $0.076 model cost per ticket, against the $6.90 a person costs tod
 Safety check: The agent cannot finalize a rebooking. Only the customer's own Confirm click can, and the agent says so. Group bookings, refunds and other out-of-scope requests go to a person with a summary, and the group ticket did exactly that.
 Next: Fix how it handles an abusive customer, then measure it against today's answers on the same five tickets. After that, make the booking dates consistent.
 Still broken: The abusive-message ticket gets the same calm entitlements rundown as everyone else, with no acknowledgement of the customer's tone and no escalation. The test bookings are dated May 2025, so replies disagree about whether to ask the customer to confirm the date. Our "came back within 72 hours" tool rests on only 8 conversations, one per kind of problem.
-Lever: intelligence
+Lever: cost
 
 ## Priya asked
 

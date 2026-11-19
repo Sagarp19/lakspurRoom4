@@ -204,6 +204,18 @@ def tool_results(response) -> List[Dict[str, Any]]:
     return results
 
 
+def _cache_last(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Mark the end of the conversation so far as a cache breakpoint, on a copy, so
+    the next turn re-reads everything up to here at the cached price. Old messages
+    are never marked, because the API allows only four breakpoints per request."""
+    last = messages[-1]
+    content = last["content"]
+    blocks = ([{"type": "text", "text": content}] if isinstance(content, str)
+              else [dict(b) for b in content])
+    blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+    return messages[:-1] + [{**last, "content": blocks}]
+
+
 def run_agent(pnr: str, last_name: str, message: str) -> str:            # ✏️ Build 1, step 1.2
     """Run the tool loop until Claude stops asking for tools. Return its final text."""
     client, tracer = new_session()
@@ -211,10 +223,18 @@ def run_agent(pnr: str, last_name: str, message: str) -> str:            # ✏�
     messages = [
         {"role": "user", "content": f"PNR {pnr}, last name {last_name}. {message}"},
     ]
+    # Prompt caching. The cache matches an exact prefix (tools, then system, then
+    # messages), so the stable text goes first and carries the breakpoint, and the
+    # clock goes after it, read once so it cannot change between turns.
+    system = [
+        {"type": "text", "text": SYSTEM_PROMPT + TONE_ADDENDUM,
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": runtime_preamble().strip()},
+    ]
 
     response = client.messages.create(
-        model=MODEL, max_tokens=4096, system=runtime_preamble() + SYSTEM_PROMPT + TONE_ADDENDUM,
-        thinking={"type": "adaptive"}, tools=tools, messages=messages,
+        model=MODEL, max_tokens=4096, system=system,
+        thinking={"type": "adaptive"}, tools=tools, messages=_cache_last(messages),
     )
 
     answer = ""
@@ -224,8 +244,8 @@ def run_agent(pnr: str, last_name: str, message: str) -> str:            # ✏�
         messages.append({"role": "user", "content": tool_results(response)})
 
         response = client.messages.create(
-            model=MODEL, max_tokens=4096, system=runtime_preamble() + SYSTEM_PROMPT + TONE_ADDENDUM,
-            thinking={"type": "adaptive"}, tools=tools, messages=messages,
+            model=MODEL, max_tokens=4096, system=system,
+            thinking={"type": "adaptive"}, tools=tools, messages=_cache_last(messages),
         )
         turns += 1
 
