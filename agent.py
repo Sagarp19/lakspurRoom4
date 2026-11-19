@@ -9,7 +9,10 @@ Where you edit:   grep -n '✏' agent.py   (six marks, one per place)
 Steps and gates:  https://anthropicpartnerbasecamp.bts.com/
 """
 from __future__ import annotations
-from typing import Any, Dict, List
+import json
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 from support import (MODEL, SYSTEM_PROMPT, call_local, execute_tool, mcp_client,
                      new_session, next_available_day, record_tool_result,
                      runtime_preamble)
@@ -17,8 +20,157 @@ from support import (MODEL, SYSTEM_PROMPT, call_local, execute_tool, mcp_client,
 MAX_TOOL_CALLS = 8  # Larkspur's own build capped the loop here; then a human takes over.
 
 TONE_ADDENDUM = ""                       # ✏️ Build 4, step 4.1, intelligence goal
-EXTRA_TOOLS: List[Dict[str, Any]] = []   # ✏️ Build 2, step 2.1: schemas for the tools you add
-LOCAL_TOOLS: Dict[str, Any] = {}         # ✏️ Build 2, step 2.1: the functions behind them
+
+DATA_DIR = Path(__file__).resolve().parent / "data" / "americas"
+
+
+# ── Build 2, step 2.1: two tools of our own ───────────────────────────────────
+def care_entitlements(policy_row_id: str, loyalty_tier: str = "member",
+                      wait_minutes_for_alternative: Optional[int] = None,
+                      overnight: bool = False) -> Dict[str, Any]:
+    """Meal / hotel / ground care for one policy row, from disruption_policy.json,
+    with the Handbook section 6 text that backs it."""
+    policy = json.loads((DATA_DIR / "disruption_policy.json").read_text(encoding="utf-8"))
+    row = next((r for r in policy["rows"] if r["policy_row_id"] == policy_row_id), None)
+    if row is None:
+        return {"error": f"Unknown policy_row_id {policy_row_id!r}.",
+                "valid_policy_row_ids": [r["policy_row_id"] for r in policy["rows"]]}
+
+    care = row["care"]
+    tier = (loyalty_tier or "member").strip().title()
+    tier_rule = policy["loyalty_rules"].get(tier, {})
+
+    # Meal: a flat amount, or a threshold on how long the wait for the alternative is.
+    meal = care["meal_usd"]
+    meal_note = None
+    if isinstance(meal, dict):
+        threshold = meal["if_wait_minutes_for_alternative_gte"]
+        if wait_minutes_for_alternative is None:
+            meal_note = (f"Depends on the wait: ${meal['amount']} if the wait for the new "
+                         f"flight is {threshold} minutes or more, otherwise ${meal['else']}. "
+                         f"Pass wait_minutes_for_alternative to resolve it.")
+            meal = None
+        else:
+            meal = meal["amount"] if wait_minutes_for_alternative >= threshold else meal["else"]
+    if meal:  # Gold and Summit get a bonus on any meal credit, up to a cap
+        meal = min(meal + tier_rule.get("meal_bonus_usd", 0),
+                   tier_rule.get("meal_bonus_cap_usd", meal + tier_rule.get("meal_bonus_usd", 0)))
+
+    # Hotel: only "if_overnight" rows depend on the overnight flag. Summit has a courtesy override.
+    hotel = dict(care["hotel"])
+    if hotel.get("eligible") == "if_overnight":
+        hotel["eligible"] = bool(overnight)
+    courtesy = tier_rule.get("courtesy_overrides", {}).get("uncontrollable_overnight_hotel")
+    if courtesy and overnight and policy_row_id in courtesy["applies_to_rows"]:
+        hotel = {"eligible": True, "nightly_cap_usd": courtesy["nightly_cap_usd"],
+                 "nights": courtesy["nights"], "approval": courtesy["approval"],
+                 "label": courtesy["label"]}
+
+    ground = care["ground_usd"]
+    if isinstance(ground, dict):
+        ground = ground["if_overnight"] if overnight else ground["else"]
+
+    handbook = (DATA_DIR / "fare_rules_excerpt.md").read_text(encoding="utf-8")
+    section = re.search(r"^### 6\..*?(?=^### |\Z)", handbook, re.S | re.M)
+
+    return {
+        "policy_row_id": policy_row_id,
+        "loyalty_tier": tier,
+        "per_passenger": {"meal_usd": meal, "ground_usd": ground},
+        "meal_note": meal_note,
+        "hotel": hotel,
+        "amounts_are": policy["amount_semantics"],
+        "handbook_section_6": section.group(0).strip() if section else None,
+    }
+
+
+def reopen_stats(intent_label: Optional[str] = None) -> Dict[str, Any]:
+    """How often each kind of problem came back within 72 hours, from the eight
+    human-handled conversations in transcripts_sample.jsonl."""
+    lines = (DATA_DIR / "transcripts_sample.jsonl").read_text(encoding="utf-8").splitlines()
+    convos = [json.loads(line) for line in lines if line.strip()]
+    if intent_label:
+        convos = [c for c in convos if c["intent_label"] == intent_label]
+        if not convos:
+            return {"error": f"No conversations with intent_label {intent_label!r}."}
+
+    by_kind: Dict[str, Dict[str, Any]] = {}
+    for c in convos:
+        k = by_kind.setdefault(c["intent_label"], {"intent_label": c["intent_label"],
+                                                   "conversations": 0, "reopened_within_72h": 0,
+                                                   "reopen_reasons": []})
+        k["conversations"] += 1
+        if c["reopened_within_72h"]:
+            k["reopened_within_72h"] += 1
+            k["reopen_reasons"].append(c.get("reopen_reason"))
+    for k in by_kind.values():
+        k["reopen_rate"] = round(k["reopened_within_72h"] / k["conversations"], 2)
+
+    reopened = sum(k["reopened_within_72h"] for k in by_kind.values())
+    return {
+        "source": "transcripts_sample.jsonl (human-handled conversations)",
+        "total_conversations": len(convos),
+        "total_reopened_within_72h": reopened,
+        "overall_reopen_rate": round(reopened / len(convos), 2),
+        "by_kind": sorted(by_kind.values(), key=lambda k: -k["reopen_rate"]),
+        "caveat": "Tiny sample: each kind of problem appears about once, so a rate is "
+                  "0% or 100% from one conversation. Report counts, not trends.",
+    }
+
+
+EXTRA_TOOLS: List[Dict[str, Any]] = [      # ✏️ Build 2, step 2.1: schemas for the tools you add
+    {
+        "name": "care_entitlements",
+        "description": (
+            "Spell out the care a customer gets while they wait: meal credit, hotel and "
+            "ground transport, in dollars per passenger, with the Handbook section 6 "
+            "(Care while you wait) text behind it. Call it AFTER check_policy, when the "
+            "customer asks what they are owed for food, a hotel or transport, or why they "
+            "are not getting one. It reads the policy row you pass and applies the "
+            "customer's loyalty tier (Gold and Summit get a meal bonus; Summit has a "
+            "courtesy hotel on weather overnights). It does not issue anything: use "
+            "issue_voucher for that. Quote amounts only from this tool's answer."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "policy_row_id": {"type": "string",
+                                  "description": "The policy_row_id check_policy returned, e.g. UNC-CXL."},
+                "loyalty_tier": {"type": "string",
+                                 "description": "From lookup_booking: member, silver, gold or summit."},
+                "wait_minutes_for_alternative": {"type": "integer",
+                                                 "description": "Minutes until the customer's new flight. Needed to decide meal credit on cancellations."},
+                "overnight": {"type": "boolean",
+                              "description": "True if the customer is stranded overnight away from home. From check_policy."},
+            },
+            "required": ["policy_row_id"],
+        },
+    },
+    {
+        "name": "reopen_stats",
+        "description": (
+            "How often each kind of problem (rebooking after a cancellation, hotel "
+            "request, refund versus credit, baggage and so on) came back to Larkspur "
+            "within 72 hours, counted over the eight conversations that human agents "
+            "handled. Use it when someone asks which problems tend to be re-opened, or "
+            "to judge whether a resolution is likely to stick. It takes no booking "
+            "information. The sample is tiny, so give counts and the reasons customers "
+            "came back, never a trend."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "intent_label": {"type": "string",
+                                 "description": "Optional. One kind of problem, e.g. refund_vs_credit. Omit for all kinds."},
+            },
+            "required": [],
+        },
+    },
+]
+LOCAL_TOOLS: Dict[str, Any] = {            # ✏️ Build 2, step 2.1: the functions behind them
+    "care_entitlements": care_entitlements,
+    "reopen_stats": reopen_stats,
+}
 
 
 def text_of(response) -> str:
@@ -83,7 +235,9 @@ def run_agent(pnr: str, last_name: str, message: str) -> str:            # ✏�
 def tool_list() -> List[Dict[str, Any]]:                   # ✏️ Build 2, step 2.2
     """Given. Exactly what Claude is offered on every turn; run.py --show-tools
     prints this list."""
-    return build_tools() + EXTRA_TOOLS
+    # mcp_client.tools() starts the MCP server on first call and returns the
+    # schemas for next_available_day and fare_rules; tool_results() already routes them.
+    return build_tools() + mcp_client.tools() + EXTRA_TOOLS
 
 
 # ──────────────────────────────────────────────────────────────────────────────
