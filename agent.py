@@ -19,34 +19,8 @@ MAX_TOOL_CALLS = 8  # Larkspur's own build capped the loop here; then a human ta
 TONE_ADDENDUM = ""                       # ✏️ Build 4, step 4.1, intelligence goal
 EXTRA_TOOLS: List[Dict[str, Any]] = []   # ✏️ Build 2, step 2.1: schemas for the tools you add
 LOCAL_TOOLS: Dict[str, Any] = {}         # ✏️ Build 2, step 2.1: the functions behind them
-"""
-EXTRA_TOOLS: List[Dict[str, Any]] = [
-    {
-        "name": "next_available_day",
-        "description": (
-            "Find the earliest date that has an open seat between two airports. "
-            "Use this when the customer's flight is cancelled, or no alternative "
-            "exists on the day they asked for, and you need to tell them when "
-            "they can actually fly. It returns a single date, not a list of "
-            "flights. To get flights you can hold, use search_alternatives. "
-            "Returns null if no seat is found."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "origin": {"type": "string", "description": "Departure airport code, e.g. AUS"},
-                "dest": {"type": "string", "description": "Arrival airport code, e.g. LAX"},
-                "date": {"type": "string", "description": "Date to start searching from, YYYY-MM-DD"},
-                "cabin": {"type": "string", "description": "Cabin code, defaults to Y (economy)"},
-            },
-            "required": ["origin", "dest", "date"],
-        },
-    },
-]   # ✏️ Build 2, step 2.1: schemas for the tools you add
-LOCAL_TOOLS: Dict[str, Any] = {"next_available_day": next_available_day}
-        # ✏️ Build 2, step 2.1: the functions behind them
 
-"""
+
 def text_of(response) -> str:
     """Given. The last non-empty text block, never content[0]."""
     texts = [b.text for b in response.content if getattr(b, "type", None) == "text" and b.text]
@@ -96,13 +70,13 @@ def run_agent(pnr: str, last_name: str, message: str) -> str:            # ✏�
     while response.stop_reason == "tool_use" and turns < MAX_TOOL_CALLS:
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results(response)})
-        
+        answer = text_of(response)
         response = client.messages.create(
             model=MODEL, max_tokens=4096, system=runtime_preamble() + SYSTEM_PROMPT + TONE_ADDENDUM,
             thinking={"type": "adaptive"}, tools=tools, messages=messages,
         )
         turns += 1
-    answer = text_of(response)
+
     return answer
 
 
@@ -147,18 +121,14 @@ def build_tools() -> List[Dict[str, Any]]:                 # ✏️ Build 1, ste
                 "type": "object",
                 "properties": {
                     "flight_no": {"type": "string"},
-                    "date": {"type": "string", "description": "Local flight date in YYYY-MM-DD format, e.g. 2025-05-08"},
+                    "date": {"type": "string", "description": "MM/DD/YYYY"},
                 },
                 "required": ["flight_no", "date"],
             },
         },
         {
             "name": "search_alternatives",
-            "description": "Search for alternative flight options for a booking. Call this after "
-            "check_policy, once you know what the customer is entitled to, and pass "
-            "the booking's pnr. Returns a list of available options, each with an "
-            "option_id. To reserve one, pass its option_id to hold_seat. Don't "
-            "invent ids; only use ones this tool returned.",
+            "description": "search",
             "input_schema": {
                 "type": "object",
                 "properties": {"pnr": {"type": "string"}},
