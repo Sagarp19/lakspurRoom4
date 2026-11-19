@@ -17,27 +17,8 @@ from support import (MODEL, SYSTEM_PROMPT, call_local, execute_tool, mcp_client,
 MAX_TOOL_CALLS = 8  # Larkspur's own build capped the loop here; then a human takes over.
 
 TONE_ADDENDUM = ""                       # ✏️ Build 4, step 4.1, intelligence goal
-EXTRA_TOOLS: List[Dict[str, Any]] = [   # ✏️ Build 2, step 2.1: schemas for the tools you add
-    {
-        "name": "hold_time_left",
-        "description": "Minutes remaining before a seat on hold is released.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"hold_id": {"type": "string"}},
-            "required": ["hold_id"],
-        },
-    },
-]
-def hold_time_left(hold_id: str) -> Dict[str, Any]:
-    from support import mock_backend
-    hold = mock_backend._holds.get(hold_id)
-    if hold is None:
-        return {"error": f"No hold {hold_id}"}
-    seconds = (hold["expires_at"] - mock_backend.FIXTURE_CLOCK).total_seconds()
-    return {"hold_id": hold_id, "minutes_remaining": seconds / 60}
-
-
-LOCAL_TOOLS: Dict[str, Any] = {"hold_time_left": hold_time_left}   # ✏️ Build 2, step 2.1: the functions behind them
+EXTRA_TOOLS: List[Dict[str, Any]] = []   # ✏️ Build 2, step 2.1: schemas for the tools you add
+LOCAL_TOOLS: Dict[str, Any] = {}         # ✏️ Build 2, step 2.1: the functions behind them
 
 
 def text_of(response) -> str:
@@ -89,20 +70,22 @@ def run_agent(pnr: str, last_name: str, message: str) -> str:            # ✏�
     while response.stop_reason == "tool_use" and turns < MAX_TOOL_CALLS:
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results(response)})
-        #answer = text_of(response)
+        answer = text_of(response)
         response = client.messages.create(
             model=MODEL, max_tokens=4096, system=runtime_preamble() + SYSTEM_PROMPT + TONE_ADDENDUM,
             thinking={"type": "adaptive"}, tools=tools, messages=messages,
         )
         turns += 1
-        answer = text_of(response)   
+
     return answer
 
 
 def tool_list() -> List[Dict[str, Any]]:                   # ✏️ Build 2, step 2.2
     """Given. Exactly what Claude is offered on every turn; run.py --show-tools
     prints this list."""
-    return build_tools() + EXTRA_TOOLS
+    """return build_tools() + EXTRA_TOOLS"""
+    return build_tools() + EXTRA_TOOLS + mcp_client.tools()
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -138,17 +121,14 @@ def build_tools() -> List[Dict[str, Any]]:                 # ✏️ Build 1, ste
                 "type": "object",
                 "properties": {
                     "flight_no": {"type": "string"},
-                    "date": {"type": "string", "description": "YYYY-MM-DD Never MM/DD/YY"},
+                    "date": {"type": "string", "description": "MM/DD/YYYY"},
                 },
                 "required": ["flight_no", "date"],
             },
         },
         {
             "name": "search_alternatives",
-            "description": "search rebooking options for a disrupted reservation .Use after "
-                           "get_flight_status and check_policy show the booking is affected.  Returns"
-                           "does not hold or change anything . Pass an option_id from this result to hold_seat "
-                           "",
+            "description": "search",
             "input_schema": {
                 "type": "object",
                 "properties": {"pnr": {"type": "string"}},
@@ -181,7 +161,12 @@ def build_tools() -> List[Dict[str, Any]]:                 # ✏️ Build 1, ste
         },
         {
             "name": "hold_seat",
-            "description": "Place a 15-minute hold on one alternative. Reversible. It simply expires.",
+            "description": "Place a 15-minute hold on one alternative returned by search_alternatives. "
+            "Pass that option's option_id exactly as search_alternatives gave it, plus "
+            "the booking's pnr; never make up an id. Reversible: the hold simply "
+            "expires if unused. Returns a hold_id, which confirm_rebooking needs to "
+            "finalize the booking (that step also needs the customer's own "
+            "Confirm-click).",
             "input_schema": {
                 "type": "object",
                 "properties": {"option_id": {"type": "string"}, "pnr": {"type": "string"}},
