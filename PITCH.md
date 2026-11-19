@@ -2,17 +2,17 @@
 
 Six lines and a lever. Your words. The last two are scored.
 
-Built:
-Does:
-Number:
-Safety check:
-Next:
-Still broken:
-Lever: <cost | speed | intelligence>
+Built: A chat agent for Larkspur flight disruptions. A customer gives a booking code and last name, and the agent looks up the booking, checks the flight, works out what Larkspur owes them, and offers new flights. It has 13 tools: 9 given, 2 from Larkspur's ops server (soonest open day, Handbook text) and 2 we wrote (care entitlements, and how often problems come back within 72 hours).
+Does: All five test tickets get an answer in 4 to 5 steps: a clean cancellation, a short delay, a missed connection, a group booking and an abusive message. It quotes meal, hotel and ground amounts from the policy table and Handbook, not from memory, and offers new flights with a 15-minute seat hold.
+Number: About $0.076 model cost per ticket, against the $6.90 a person costs today. That is 5 tickets answered in 21 steps and 17 tool calls, using 103,386 input and 4,501 output tokens. We have not yet measured a before-and-after for the lever.
+Safety check: The agent cannot finalize a rebooking. Only the customer's own Confirm click can, and the agent says so. Group bookings, refunds and other out-of-scope requests go to a person with a summary, and the group ticket did exactly that.
+Next: Fix how it handles an abusive customer, then measure it against today's answers on the same five tickets. After that, make the booking dates consistent.
+Still broken: The abusive-message ticket gets the same calm entitlements rundown as everyone else, with no acknowledgement of the customer's tone and no escalation. The test bookings are dated May 2025, so replies disagree about whether to ask the customer to confirm the date. Our "came back within 72 hours" tool rests on only 8 conversations, one per kind of problem.
+Lever: intelligence
 
 ## Priya asked
 
-Costs:
-Wrong:
-Runs it:
-Left out:
+Costs: About $0.076 per customer helped, against $6.90 for a person, so roughly 1% of that cost. It comes from our five-ticket run (103,386 tokens in, 4,501 out, no caching) at Sonnet list prices of $3 and $15 per million tokens. It is the model cost only. Larkspur's own case study puts the full cost per contact, with infrastructure and testing, at around 1.6 times the model cost, so call it about $0.12 once loaded. That is an estimate, and the prices should be checked against the current price page before they go to a client.
+Wrong: The agent quotes dollar amounts and rules from a policy table and the Handbook through tools, and every policy answer carries a row id, so a claim can be checked against the table after the fact. Every step is recorded in a trace. Today we find mistakes by reading traces and running our test tickets. Nothing watches live conversations yet, and that is a gap. The customer is protected by design: the agent cannot finalize a rebooking without the customer's own Confirm click, small vouchers are capped, and anything out of scope goes to a person with a summary. A wrong statement is still possible, and the customer would most likely find out by contacting Larkspur again.
+Runs it: Not decided. Nothing in the build names an owner, and it should be a named person on Larkspur's customer care or operations team. The job is to read the traces and re-contact rate, run the test cases after every change, and update the policy table first (with a version bump) whenever the Handbook changes. The tools to do that exist: the trace, the test cases and the benchmark. The person does not yet.
+Left out: Refunds, hotel approval, fare-difference collection, group bookings of 10 or more, unaccompanied minors, partner-airline flights, pets in cabin, medical requests and baggage tracing. Larkspur's Handbook gives those to people, so the agent explains and hands over. We also did not build live monitoring or prompt caching, and the agent still does not handle abusive customers well.
